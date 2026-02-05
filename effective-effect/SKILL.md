@@ -1,12 +1,12 @@
 ---
 name: effect-best-practices
 description: Enforces Effect-TS patterns for services, errors, layers, and atoms. Use when writing code with Context.Tag, Schema.TaggedError, Layer composition, or effect-atom React components.
-version: 2.0.0
+version: 3.0.0
 ---
 
 # Effect-TS Best Practices
 
-This skill enforces opinionated, consistent patterns for Effect-TS codebases based on [makisuo/skills/effect-best-practices](https://github.com/makisuo/skills) and [effect-solutions](https://solutions.effect.website) guide. These patterns optimize for type safety, testability, observability, and maintainability.
+This skill enforces opinionated, consistent patterns for Effect-TS codebases. These patterns optimize for type safety, testability, observability, and maintainability.
 
 ## Core Principles
 

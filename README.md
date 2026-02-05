@@ -3,7 +3,7 @@ This repo consists of my custom agent skills.
 
 For now there is only one:
 
-- `effect-best-practices` : Install via `npx skills add https://github.com/stromseng/skills --skill effect-best-practices`
+- `effective-effect` : Install via `npx skills add https://github.com/stromseng/skills --skill effective-effect`
 
 
 ## Contributing
