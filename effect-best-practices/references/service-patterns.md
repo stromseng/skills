@@ -398,3 +398,288 @@ readonly findById: (id: UserId) => Effect.Effect<User, UserNotFoundError>
 // findByIdOption returns Option for "may not exist" semantics
 readonly findByIdOption: (id: UserId) => Effect.Effect<Option<User>>
 ```
+
+## Client Wrapper Pattern
+
+Wrap third-party SDK clients (Stripe, Resend, AWS, etc.) with Effect using the "use" pattern for consistent error handling, tracing, and dependency injection.
+
+### Pattern Structure
+
+```typescript
+import { Context, Effect, Layer, Config, Redacted, Schema } from "effect"
+
+// 1. Define tagged errors with Schema.Defect for cause
+export class MyClientSyncError extends Schema.TaggedError<MyClientSyncError>()(
+  "MyClientSyncError",
+  { cause: Schema.Defect }
+) {}
+
+export class MyClientAsyncError extends Schema.TaggedError<MyClientAsyncError>()(
+  "MyClientAsyncError",
+  { cause: Schema.Defect }
+) {}
+
+export class MyClientInstantiationError extends Schema.TaggedError<MyClientInstantiationError>()(
+  "MyClientInstantiationError",
+  { cause: Schema.Defect }
+) {}
+
+// Union type for convenience
+export type MyClientError =
+  | MyClientSyncError
+  | MyClientAsyncError
+  | MyClientInstantiationError
+
+// 2. Define service interface with `use` method (supports sync and async)
+export type IMyClient = Readonly<{
+  client: ThirdPartyClient
+  use: <T>(
+    fn: (client: ThirdPartyClient) => T
+  ) => Effect.Effect<Awaited<T>, MyClientSyncError | MyClientAsyncError, never>
+}>
+
+// 3. Create the service implementation
+const make = Effect.gen(function* () {
+  const apiKey = yield* Config.redacted("MY_CLIENT_API_KEY")
+
+  const client = yield* Effect.try({
+    try: () => new ThirdPartyClient(Redacted.value(apiKey)),
+    catch: (cause) => new MyClientInstantiationError({ cause }),
+  })
+
+  // Handles both sync and async client methods
+  const use = <T>(fn: (client: ThirdPartyClient) => T) =>
+    Effect.gen(function* () {
+      const result = yield* Effect.try({
+        try: () => fn(client),
+        catch: (cause) => new MyClientSyncError({ cause }),
+      })
+
+      if (result instanceof Promise) {
+        return yield* Effect.tryPromise({
+          try: () => result,
+          catch: (cause) => new MyClientAsyncError({ cause }),
+        })
+      }
+
+      return result as Awaited<T>
+    }).pipe(Effect.withSpan(`my_client.${fn.name ?? "use"}`))
+
+  return { client, use }
+})
+
+// 4. Export as Context.Tag with Default layer
+export class MyClient extends Context.Tag("MyClient")<MyClient, IMyClient>() {
+  static Default = Layer.effect(this, make).pipe(
+    Layer.annotateSpans({ module: "MyClient" })
+  )
+}
+```
+
+### Usage
+
+```typescript
+const program = Effect.gen(function* () {
+  const myClient = yield* MyClient
+
+  // Works with async methods (returns Promise)
+  const asyncResult = yield* myClient.use((client) =>
+    client.someAsyncMethod({ param: "value" })
+  )
+
+  // Also works with sync methods (returns value directly)
+  const syncResult = yield* myClient.use((client) =>
+    client.someSyncMethod()
+  )
+
+  return { asyncResult, syncResult }
+})
+
+// Run with layer
+program.pipe(Effect.provide(MyClient.Default))
+```
+
+### Key Benefits
+
+1. **Centralized error handling** - All client errors wrapped in typed errors
+2. **Automatic tracing** - Every `use` call creates a span with the function name via `Effect.withSpan`
+3. **Config-based secrets** - API keys loaded via `Config.redacted`
+4. **Clean DI** - Consumers inject via `yield* MyClient`
+5. **Encapsulation** - Raw client hidden behind `use` interface
+6. **Stack trace preservation** - `Schema.Defect` preserves the original error for debugging
+7. **Sync/async agnostic** - Handles both sync and async client methods via `instanceof Promise` check
+8. **Precise error types** - Separate `SyncError` and `AsyncError` for granular error handling
+
+### Variations
+
+#### Domain-Specific Error Types
+
+Extend the base pattern with domain-specific errors:
+
+```typescript
+export class MyClientNetworkError extends Schema.TaggedError<MyClientNetworkError>()(
+  "MyClientNetworkError",
+  { cause: Schema.Defect }
+) {}
+
+export class MyClientValidationError extends Schema.TaggedError<MyClientValidationError>()(
+  "MyClientValidationError",
+  { message: Schema.String }
+) {}
+
+const mapSyncError = (cause: unknown) => {
+  if (cause instanceof ValidationError) {
+    return new MyClientValidationError({ message: cause.message })
+  }
+  return new MyClientSyncError({ cause })
+}
+
+const mapAsyncError = (cause: unknown) => {
+  if (cause instanceof NetworkError) {
+    return new MyClientNetworkError({ cause })
+  }
+  return new MyClientAsyncError({ cause })
+}
+
+const use = <T>(fn: (client: ThirdPartyClient) => T) =>
+  Effect.gen(function* () {
+    const result = yield* Effect.try({
+      try: () => fn(client),
+      catch: mapSyncError,
+    })
+
+    if (result instanceof Promise) {
+      return yield* Effect.tryPromise({
+        try: () => result,
+        catch: mapAsyncError,
+      })
+    }
+
+    return result as Awaited<T>
+  }).pipe(Effect.withSpan(`my_client.${fn.name ?? "use"}`))
+```
+
+#### Named Operations
+
+Expose specific methods instead of generic `use`:
+
+```typescript
+export type IEmailClient = Readonly<{
+  sendEmail: (params: SendEmailParams) => Effect.Effect<EmailResult, EmailError>
+  getEmail: (id: string) => Effect.Effect<Email, EmailError>
+}>
+
+const make = Effect.gen(function* () {
+  const resend = yield* ResendClient
+
+  return {
+    sendEmail: (params) =>
+      resend
+        .use((client) => client.emails.send(params))
+        .pipe(Effect.withSpan("email_client.send")),
+
+    getEmail: (id) =>
+      resend
+        .use((client) => client.emails.get(id))
+        .pipe(Effect.withSpan("email_client.get")),
+  }
+})
+```
+
+#### With Retry Policy
+
+```typescript
+import { Schedule } from "effect"
+
+const retryPolicy = Schedule.exponential(100).pipe(
+  Schedule.intersect(Schedule.recurs(3)),
+  Schedule.jittered
+)
+
+const use = <T>(fn: (client: ThirdPartyClient) => T) =>
+  Effect.gen(function* () {
+    const result = yield* Effect.try({
+      try: () => fn(client),
+      catch: (cause) => new MyClientSyncError({ cause }),
+    })
+
+    if (result instanceof Promise) {
+      return yield* Effect.tryPromise({
+        try: () => result,
+        catch: (cause) => new MyClientAsyncError({ cause }),
+      }).pipe(Effect.retry(retryPolicy))
+    }
+
+    return result as Awaited<T>
+  }).pipe(Effect.withSpan(`my_client.${fn.name ?? "use"}`))
+```
+
+### Real-World Example: Stripe
+
+```typescript
+import Stripe from "stripe"
+import { Context, Effect, Layer, Config, Redacted, Schema } from "effect"
+
+export class StripeSyncError extends Schema.TaggedError<StripeSyncError>()(
+  "StripeSyncError",
+  { cause: Schema.Defect }
+) {}
+
+export class StripeAsyncError extends Schema.TaggedError<StripeAsyncError>()(
+  "StripeAsyncError",
+  { cause: Schema.Defect }
+) {}
+
+export type StripeError = StripeSyncError | StripeAsyncError
+
+export type IStripeClient = Readonly<{
+  use: <T>(
+    fn: (stripe: Stripe) => T
+  ) => Effect.Effect<Awaited<T>, StripeSyncError | StripeAsyncError>
+}>
+
+const make = Effect.gen(function* () {
+  const secretKey = yield* Config.redacted("STRIPE_SECRET_KEY")
+
+  const client = new Stripe(Redacted.value(secretKey))
+
+  const use = <T>(fn: (stripe: Stripe) => T) =>
+    Effect.gen(function* () {
+      const result = yield* Effect.try({
+        try: () => fn(client),
+        catch: (cause) => new StripeSyncError({ cause }),
+      })
+
+      if (result instanceof Promise) {
+        return yield* Effect.tryPromise({
+          try: () => result,
+          catch: (cause) => new StripeAsyncError({ cause }),
+        })
+      }
+
+      return result as Awaited<T>
+    }).pipe(Effect.withSpan(`stripe.${fn.name ?? "use"}`))
+
+  return { use }
+})
+
+export class StripeClient extends Context.Tag("StripeClient")<
+  StripeClient,
+  IStripeClient
+>() {
+  static Default = Layer.effect(this, make).pipe(
+    Layer.annotateSpans({ module: "StripeClient" })
+  )
+}
+
+// Usage
+const createCustomer = Effect.gen(function* () {
+  const stripe = yield* StripeClient
+
+  const customer = yield* stripe.use((client) =>
+    client.customers.create({ email: "user@example.com" })
+  )
+
+  return customer
+})
+```
