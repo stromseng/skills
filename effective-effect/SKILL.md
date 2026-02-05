@@ -1,5 +1,5 @@
 ---
-name: effect-best-practices
+name: effective-effect
 description: Enforces Effect-TS patterns for services, errors, layers, and atoms. Use when writing code with Context.Tag, Schema.TaggedError, Layer composition, or effect-atom React components.
 version: 3.0.0
 ---
