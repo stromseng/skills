@@ -1,7 +1,7 @@
 ---
 name: effective-effect
 description: Enforces Effect-TS patterns for services, errors, layers, and atoms. Use when writing code with Context.Tag, Schema.TaggedError, Layer composition, or effect-atom React components.
-version: 3.0.0
+version: 3.0.1
 ---
 
 # Effect-TS Best Practices
@@ -498,7 +498,7 @@ const name = Args.text({ name: "name" }).pipe(Args.withDefault("World"))
 const shout = Options.boolean("shout").pipe(Options.withAlias("s"))
 
 const greet = Command.make("greet", { name, shout }, ({ name, shout }) => {
-  const message = `Hello, ${name}!`
+  const message = `Hello, ${name}`
   return Console.log(shout ? message.toUpperCase() : message)
 })
 
