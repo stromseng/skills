@@ -132,6 +132,24 @@ it.live("real clock", () =>
 )
 ```
 
+### it.scopedLive()
+
+For tests that need both scoped resources and real time (live environment):
+
+```typescript
+import { Effect } from "effect"
+
+it.scopedLive("live test with resources", () =>
+  Effect.gen(function* () {
+    const resource = yield* Effect.acquireRelease(
+      acquireRealResource,
+      () => releaseRealResource
+    )
+    // Uses real clock + automatic resource cleanup
+  })
+)
+```
+
 ### Using TestClock
 
 `it.effect` automatically provides TestContext with TestClock. Use `TestClock.adjust` to simulate time:
@@ -215,6 +233,57 @@ it.effect.fails("known bug", () =>
 )
 ```
 
+## Effect-Specific Utilities
+
+`@effect/vitest` provides additional assertion utilities in `utils`:
+
+```typescript
+import { it } from "@effect/vitest"
+import {
+  assertEquals,       // Uses Effect's Equal.equals
+  assertTrue,
+  assertFalse,
+  assertSome,        // For Option.Some
+  assertNone,        // For Option.None
+  assertRight,       // For Either.Right
+  assertLeft,        // For Either.Left
+  assertSuccess,     // For Exit.Success
+  assertFailure      // For Exit.Failure
+} from "@effect/vitest/utils"
+import { Effect, Option, Either } from "effect"
+
+it.effect("with effect assertions", () =>
+  Effect.gen(function* () {
+    const option = yield* someOptionalEffect
+    assertSome(option, expectedValue)
+
+    const either = yield* someEitherEffect
+    assertRight(either, expectedValue)
+  })
+)
+```
+
+## Testing Expected Failures with Effect.flip
+
+Use `Effect.flip` to convert failures to successes for simpler assertions:
+
+```typescript
+import { it, expect } from "@effect/vitest"
+import { Effect, Data } from "effect"
+
+class UserNotFoundError extends Data.TaggedError("UserNotFoundError")<{
+  userId: string
+}> {}
+
+it.effect("should fail with specific error", () =>
+  Effect.gen(function* () {
+    const error = yield* Effect.flip(failingOperation())
+    expect(error).toBeInstanceOf(UserNotFoundError)
+    expect(error.userId).toBe("123")
+  })
+)
+```
+
 ## Logging
 
 By default, `it.effect` suppresses log output. To enable logging:
@@ -234,6 +303,66 @@ it.live("live with logging", () =>
   Effect.gen(function* () {
     yield* Effect.log("This will be shown")
   })
+)
+```
+
+## Stateful Mock Layers
+
+For tests that need to track state across multiple operations:
+
+```typescript
+import { Context, Effect, Layer, Ref, Option } from "effect"
+
+interface User {
+  id: string
+  name: string
+  email: string
+}
+
+interface UserRepository {
+  findById: (id: string) => Effect.Effect<Option.Option<User>>
+  save: (user: User) => Effect.Effect<User>
+}
+
+const UserRepository = Context.GenericTag<UserRepository>("UserRepository")
+
+// Mock with state using Ref
+const UserRepositoryStateful = Layer.effect(
+  UserRepository,
+  Effect.gen(function* () {
+    const storage = yield* Ref.make<Map<string, User>>(new Map([
+      ["1", { id: "1", name: "Alice", email: "alice@example.com" }]
+    ]))
+
+    return {
+      findById: (id: string) =>
+        storage.get.pipe(
+          Effect.map((map) => Option.fromNullable(map.get(id)))
+        ),
+
+      save: (user: User) =>
+        storage.update((map) => map.set(user.id, user)).pipe(
+          Effect.as(user)
+        )
+    }
+  })
+)
+
+// Usage in tests
+it.effect("should save and retrieve user", () =>
+  Effect.gen(function* () {
+    const repo = yield* UserRepository
+
+    const newUser = { id: "2", name: "Bob", email: "bob@example.com" }
+    yield* repo.save(newUser)
+
+    const result = yield* repo.findById("2")
+
+    expect(Option.isSome(result)).toBe(true)
+    if (Option.isSome(result)) {
+      expect(result.value.name).toBe("Bob")
+    }
+  }).pipe(Effect.provide(UserRepositoryStateful))
 )
 ```
 
@@ -503,6 +632,123 @@ bunx vitest run tests/user.test.ts
 # Run tests matching pattern
 bunx vitest run -t "UserService"
 ```
+
+## Property-Based Testing
+
+### Using it.prop for Pure Properties
+
+```typescript
+import { FastCheck } from "effect"
+import { it } from "@effect/vitest"
+
+it.prop(
+  "addition is commutative",
+  [FastCheck.integer(), FastCheck.integer()],
+  ([a, b]) => a + b === b + a
+)
+
+// With object syntax
+it.prop(
+  "multiplication distributes",
+  { a: FastCheck.integer(), b: FastCheck.integer(), c: FastCheck.integer() },
+  ({ a, b, c }) => a * (b + c) === a * b + a * c
+)
+```
+
+### Using it.effect.prop for Effect Properties
+
+```typescript
+import { it } from "@effect/vitest"
+import { Effect, Context, FastCheck } from "effect"
+
+class Database extends Context.Tag("Database")<Database, {
+  set: (key: string, value: number) => Effect.Effect<void>
+  get: (key: string) => Effect.Effect<number>
+}>() {}
+
+it.effect.prop(
+  "database operations are idempotent",
+  [FastCheck.string(), FastCheck.integer()],
+  ([key, value]) =>
+    Effect.gen(function* () {
+      const db = yield* Database
+
+      yield* db.set(key, value)
+      const result1 = yield* db.get(key)
+
+      yield* db.set(key, value)
+      const result2 = yield* db.get(key)
+
+      return result1 === result2
+    })
+)
+```
+
+### With Schema Arbitraries
+
+```typescript
+import { it, expect } from "@effect/vitest"
+import { Effect, Schema } from "effect"
+
+const User = Schema.Struct({
+  id: Schema.String,
+  age: Schema.Number.pipe(Schema.between(0, 120))
+})
+
+it.effect.prop(
+  "user validation works",
+  { user: User },
+  ({ user }) =>
+    Effect.gen(function* () {
+      expect(user.age).toBeGreaterThanOrEqual(0)
+      expect(user.age).toBeLessThanOrEqual(120)
+      return true
+    })
+)
+```
+
+### Configuring FastCheck
+
+```typescript
+import { it } from "@effect/vitest"
+import { Effect, FastCheck } from "effect"
+
+it.effect.prop(
+  "property test",
+  [FastCheck.integer()],
+  ([n]) => Effect.succeed(n >= 0 || n < 0),
+  {
+    timeout: 10000,
+    fastCheck: {
+      numRuns: 1000,
+      seed: 42,
+      verbose: true
+    }
+  }
+)
+```
+
+## Common Pitfalls
+
+1. **Not Providing Layers**: Forgetting to provide required services causes runtime errors.
+
+2. **Shared State Between Tests**: Tests interfering with each other via shared mutable state. Use fresh layers per test or reset state in beforeEach.
+
+3. **Only Testing Happy Paths**: Not testing error scenarios. Use `Effect.flip` and `Effect.exit` to test failures.
+
+4. **Missing Cleanup Tests**: Not verifying finalizers execute properly. Check that `Effect.addFinalizer` callbacks run.
+
+5. **Ignoring Concurrency**: Not testing concurrent behavior. Use `Effect.fork` and `Fiber.join` to test parallel operations.
+
+6. **Flaky Tests from Race Conditions**: Tests that sometimes pass, sometimes fail. Use `TestClock` for deterministic timing.
+
+7. **Over-Mocking**: Mocking too much loses integration value. Only mock external services, not internal logic.
+
+8. **Not Testing Interruption**: Missing interruption scenarios. Test that operations handle `Fiber.interrupt` gracefully.
+
+9. **Hardcoded Timing**: Tests that depend on specific wall-clock timing. Use `TestClock.adjust` instead of `Effect.sleep` with real time.
+
+10. **Missing Exit Checks**: Not verifying Exit values properly. Use `Exit.isSuccess`, `Exit.isFailure`, and `Cause.failureOption`.
 
 ## Next Steps
 

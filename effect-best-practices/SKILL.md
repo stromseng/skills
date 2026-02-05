@@ -6,7 +6,58 @@ version: 2.0.0
 
 # Effect-TS Best Practices
 
-This skill enforces opinionated, consistent patterns for Effect-TS codebases based on [makisuo/skills/effect-best-practices](https://github.com/makisuo/skills) and [effect-solutions](https://solutions.effect.website) guide and . These patterns optimize for type safety, testability, observability, and maintainability.
+This skill enforces opinionated, consistent patterns for Effect-TS codebases based on [makisuo/skills/effect-best-practices](https://github.com/makisuo/skills) and [effect-solutions](https://solutions.effect.website) guide. These patterns optimize for type safety, testability, observability, and maintainability.
+
+## Core Principles
+
+### Effect Type Signature
+
+```
+Effect<Success, Error, Requirements>
+//      ↑        ↑       ↑
+//      |        |       └── Dependencies (provided via Layers)
+//      |        └── Expected errors (typed, must be handled)
+//      └── Success value
+```
+
+### Prefer Explicit Over Generic Errors
+
+**Every distinct failure reason deserves its own error type.** Don't collapse multiple failure modes into generic HTTP errors like `NotFoundError` or `BadRequestError`.
+
+```typescript
+// BAD - Generic errors lose context
+class NotFoundError extends Schema.TaggedError<NotFoundError>()("NotFoundError", {
+  message: Schema.String // Dont use `message` as it may hide context when using Effect.log
+}) {}
+
+// GOOD - Specific errors enable precise handling
+class UserNotFoundError extends Schema.TaggedError<UserNotFoundError>()(
+  "UserNotFoundError",
+  { userId: UserId, userMessage: Schema.String }
+) {}
+
+class SessionExpiredError extends Schema.TaggedError<SessionExpiredError>()(
+  "SessionExpiredError",
+  { expiredAt: Schema.Date, userMessage: Schema.String }
+) {}
+
+// GOOD - Wrapping errors with cause preserves stack traces
+class UserLookupError extends Schema.TaggedError<UserLookupError>()(
+  "UserLookupError",
+  {
+    userId: UserId,
+    reason: Schema.String, // prefer using `reason` over `message` for logging
+    cause: Schema.Defect, // Wraps the underlying error - Effect.log prints as stack trace
+  }
+) {}
+```
+
+**Benefits:**
+- `UserNotFoundError` with `userId` → Frontend shows "User doesn't exist"
+- `SessionExpiredError` with `expiredAt` → Frontend shows "Session expired, please log in"
+- Type-safe error handling with `catchTag`/`catchTags`
+- Not using the `message` field allows `Effect.log` to log all error context values. This way we will see both the `expiredAt` and `userMessage` fields in the logs, if we log the error.
+- Using a `cause` field of type `Schema.Defect` preserves the original stack trace when logging the error.
 
 ## Quick Reference: Critical Rules
 
@@ -516,7 +567,9 @@ See `references/effect-atom-patterns.md` for complete patterns.
 
 ```typescript
 // FORBIDDEN - runSync/runPromise inside services
-const result = Effect.runSync(someEffect)
+yield* Effect.gen(function* () {
+  const result = Effect.runPromise(someEffect)
+}) // Always prefer yielding the effect. As a workaround for libraries requiring promises etc, extract the current runtime using `const runtime = yield* Effect.runtime<never>();` then use it to run the promise.
 
 // FORBIDDEN - throw inside Effect.gen
 yield* Effect.gen(function* () {
@@ -547,9 +600,10 @@ For detailed patterns, consult these reference files in the `references/` direct
 - `schema-patterns.md` - Branded types, Schema.Class, JSON encoding
 - `layer-patterns.md` - Dependency composition, memoization, testing layers
 - `config-patterns.md` - Config primitives, Schema.Config, ConfigProvider
-- `testing-patterns.md` - @effect/vitest, it.effect, it.scoped, TestClock
+- `testing-patterns.md` - @effect/vitest, it.effect, it.scoped, TestClock, property-based testing
 - `cli-patterns.md` - @effect/cli Commands, Args, Options, subcommands
 - `effect-atom-patterns.md` - Atom, families, React hooks, Result handling
+- `domain-predicates.md` - Equivalence, Order, Schema.Data for equality and sorting
 - `anti-patterns.md` - Complete list of forbidden patterns
 - `observability-patterns.md` - Logging, metrics, config patterns
 - `rpc-cluster-patterns.md` - RpcGroup, Workflow, Activity patterns
