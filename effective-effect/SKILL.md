@@ -604,15 +604,15 @@ See `references/anti-patterns.md` for the complete list with rationale.
 
 For detailed patterns or in the case of any ambiguity you must consult these reference files in the `references/` directory:
 
-- `service-patterns.md` - Effect.Service vs Context.Tag, dependencies, test layers
-- `error-patterns.md` - Schema.TaggedError, yieldable errors, Schema.Defect
-- `schema-patterns.md` - Branded types, Schema.Class, JSON encoding
-- `layer-patterns.md` - Dependency composition, memoization, testing layers
-- `config-patterns.md` - Config primitives, Schema.Config, ConfigProvider
-- `testing-patterns.md` - @effect/vitest, it.effect, it.scoped, TestClock, property-based testing
-- `cli-patterns.md` - @effect/cli Commands, Args, Options, subcommands
-- `effect-atom-patterns.md` - Atom, families, React hooks, Result handling
-- `domain-predicates.md` - Equivalence, Order, Schema.Data for equality and sorting
 - `anti-patterns.md` - Complete list of forbidden patterns
+- `cli-patterns.md` - @effect/cli Commands, Args, Options, subcommands
+- `config-patterns.md` - Config primitives, Schema.Config, ConfigProvider
+- `domain-predicates.md` - Equivalence, Order, Schema.Data for equality and sorting
+- `effect-atom-patterns.md` - Atom, families, React hooks, Result handling
+- `error-patterns.md` - Schema.TaggedError, yieldable errors, Schema.Defect
+- `layer-patterns.md` - Dependency composition, memoization, testing layers
 - `observability-patterns.md` - Logging, metrics, config patterns
 - `rpc-cluster-patterns.md` - RpcGroup, Workflow, Activity patterns
+- `schema-patterns.md` - Branded types, Schema.Class, JSON encoding
+- `service-patterns.md` - Effect.Service vs Context.Tag, dependencies, test layers
+- `testing-patterns.md` - @effect/vitest, it.effect, it.scoped, TestClock, property-based testing
