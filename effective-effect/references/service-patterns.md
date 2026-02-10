@@ -401,7 +401,7 @@ readonly findByIdOption: (id: UserId) => Effect.Effect<Option<User>>
 
 ## Client Wrapper Pattern
 
-Wrap third-party SDK clients (Stripe, Resend, AWS, etc.) with Effect using the "use" pattern for consistent error handling, tracing, and dependency injection.
+Wrap third-party SDK clients (Stripe, Resend, AWS, etc.) with Effect using an internal `use` helper, then re-expose domain operations as named service methods.
 
 ### Pattern Structure
 
@@ -430,12 +430,12 @@ export type MyClientError =
   | MyClientAsyncError
   | MyClientInstantiationError
 
-// 2. Define service interface with `use` method (supports sync and async)
+// 2. Define service interface with named operations (easy to mock)
 export type IMyClient = Readonly<{
-  client: ThirdPartyClient
-  use: <T>(
-    fn: (client: ThirdPartyClient) => T
-  ) => Effect.Effect<Awaited<T>, MyClientSyncError | MyClientAsyncError, never>
+  someAsyncMethod: (
+    params: { param: string }
+  ) => Effect.Effect<AsyncResult, MyClientSyncError | MyClientAsyncError>
+  someSyncMethod: () => Effect.Effect<SyncResult, MyClientSyncError | MyClientAsyncError>
 }>
 
 // 3. Create the service implementation
@@ -447,8 +447,8 @@ const make = Effect.gen(function* () {
     catch: (cause) => new MyClientInstantiationError({ cause }),
   })
 
-  // Handles both sync and async client methods
-  const use = <T>(fn: (client: ThirdPartyClient) => T) =>
+  // Internal helper for sync + async SDK methods
+  const use = <T>(operation: string, fn: (client: ThirdPartyClient) => T) =>
     Effect.gen(function* () {
       const result = yield* Effect.try({
         try: () => fn(client),
@@ -463,9 +463,15 @@ const make = Effect.gen(function* () {
       }
 
       return result as Awaited<T>
-    }).pipe(Effect.withSpan(`my_client.${fn.name ?? "use"}`))
+    }).pipe(Effect.withSpan(`my_client.${operation}`))
 
-  return { client, use }
+  const someAsyncMethod = (params: { param: string }) =>
+    use("someAsyncMethod", (client) => client.someAsyncMethod(params))
+
+  const someSyncMethod = () =>
+    use("someSyncMethod", (client) => client.someSyncMethod())
+
+  return { someAsyncMethod, someSyncMethod }
 })
 
 // 4. Export as Context.Tag with Default layer
@@ -482,15 +488,8 @@ export class MyClient extends Context.Tag("MyClient")<MyClient, IMyClient>() {
 const program = Effect.gen(function* () {
   const myClient = yield* MyClient
 
-  // Works with async methods (returns Promise)
-  const asyncResult = yield* myClient.use((client) =>
-    client.someAsyncMethod({ param: "value" })
-  )
-
-  // Also works with sync methods (returns value directly)
-  const syncResult = yield* myClient.use((client) =>
-    client.someSyncMethod()
-  )
+  const asyncResult = yield* myClient.someAsyncMethod({ param: "value" })
+  const syncResult = yield* myClient.someSyncMethod()
 
   return { asyncResult, syncResult }
 })
@@ -502,13 +501,13 @@ program.pipe(Effect.provide(MyClient.Default))
 ### Key Benefits
 
 1. **Centralized error handling** - All client errors wrapped in typed errors
-2. **Automatic tracing** - Every `use` call creates a span with the function name via `Effect.withSpan`
+2. **Automatic tracing** - Internal `use` creates consistent spans for every SDK call
 3. **Config-based secrets** - API keys loaded via `Config.redacted`
 4. **Clean DI** - Consumers inject via `yield* MyClient`
-5. **Encapsulation** - Raw client hidden behind `use` interface
+5. **Encapsulation** - Raw client and `use` helper stay internal to the service
 6. **Stack trace preservation** - `Schema.Defect` preserves the original error for debugging
 7. **Sync/async agnostic** - Handles both sync and async client methods via `instanceof Promise` check
-8. **Precise error types** - Separate `SyncError` and `AsyncError` for granular error handling
+8. **Mock-friendly API** - Tests mock named methods instead of callback-based `use`
 
 ### Variations
 
@@ -541,7 +540,7 @@ const mapAsyncError = (cause: unknown) => {
   return new MyClientAsyncError({ cause })
 }
 
-const use = <T>(fn: (client: ThirdPartyClient) => T) =>
+const use = <T>(operation: string, fn: (client: ThirdPartyClient) => T) =>
   Effect.gen(function* () {
     const result = yield* Effect.try({
       try: () => fn(client),
@@ -556,12 +555,12 @@ const use = <T>(fn: (client: ThirdPartyClient) => T) =>
     }
 
     return result as Awaited<T>
-  }).pipe(Effect.withSpan(`my_client.${fn.name ?? "use"}`))
+  }).pipe(Effect.withSpan(`my_client.${operation}`))
 ```
 
-#### Named Operations
+#### Testing with a Mock Service
 
-Expose specific methods instead of generic `use`:
+Provide only the named operations your app uses:
 
 ```typescript
 export type IEmailClient = Readonly<{
@@ -569,21 +568,12 @@ export type IEmailClient = Readonly<{
   getEmail: (id: string) => Effect.Effect<Email, EmailError>
 }>
 
-const make = Effect.gen(function* () {
-  const resend = yield* ResendClient
-
-  return {
-    sendEmail: (params) =>
-      resend
-        .use((client) => client.emails.send(params))
-        .pipe(Effect.withSpan("email_client.send")),
-
-    getEmail: (id) =>
-      resend
-        .use((client) => client.emails.get(id))
-        .pipe(Effect.withSpan("email_client.get")),
-  }
+const mockEmailClient = EmailClient.of({
+  sendEmail: (_params) => Effect.succeed({ id: "test-id", status: "queued" }),
+  getEmail: (_id) => Effect.succeed({ id: "test-id", subject: "Hello" }),
 })
+
+program.pipe(Effect.provideService(EmailClient, mockEmailClient))
 ```
 
 #### With Retry Policy
@@ -596,7 +586,7 @@ const retryPolicy = Schedule.exponential(100).pipe(
   Schedule.jittered
 )
 
-const use = <T>(fn: (client: ThirdPartyClient) => T) =>
+const use = <T>(operation: string, fn: (client: ThirdPartyClient) => T) =>
   Effect.gen(function* () {
     const result = yield* Effect.try({
       try: () => fn(client),
@@ -611,7 +601,7 @@ const use = <T>(fn: (client: ThirdPartyClient) => T) =>
     }
 
     return result as Awaited<T>
-  }).pipe(Effect.withSpan(`my_client.${fn.name ?? "use"}`))
+  }).pipe(Effect.withSpan(`my_client.${operation}`))
 ```
 
 ### Real-World Example: Stripe
@@ -633,9 +623,10 @@ export class StripeAsyncError extends Schema.TaggedError<StripeAsyncError>()(
 export type StripeError = StripeSyncError | StripeAsyncError
 
 export type IStripeClient = Readonly<{
-  use: <T>(
-    fn: (stripe: Stripe) => T
-  ) => Effect.Effect<Awaited<T>, StripeSyncError | StripeAsyncError>
+  createCustomer: (
+    params: Stripe.CustomerCreateParams
+  ) => Effect.Effect<Stripe.Customer, StripeError>
+  retrieveCustomer: (id: string) => Effect.Effect<Stripe.Customer, StripeError>
 }>
 
 const make = Effect.gen(function* () {
@@ -643,7 +634,7 @@ const make = Effect.gen(function* () {
 
   const client = new Stripe(Redacted.value(secretKey))
 
-  const use = <T>(fn: (stripe: Stripe) => T) =>
+  const use = <T>(operation: string, fn: (stripe: Stripe) => T) =>
     Effect.gen(function* () {
       const result = yield* Effect.try({
         try: () => fn(client),
@@ -658,9 +649,25 @@ const make = Effect.gen(function* () {
       }
 
       return result as Awaited<T>
-    }).pipe(Effect.withSpan(`stripe.${fn.name ?? "use"}`))
+    }).pipe(Effect.withSpan(`stripe.${operation}`))
 
-  return { use }
+  const createCustomer = (params: Stripe.CustomerCreateParams) =>
+    use("customers.create", (stripe) => stripe.customers.create(params))
+
+  const retrieveCustomer = (id: string) =>
+    use("customers.retrieve", (stripe) => stripe.customers.retrieve(id)).pipe(
+      Effect.flatMap((customer) =>
+        customer.deleted
+          ? Effect.fail(
+              new StripeSyncError({
+                cause: new Error("Customer is deleted"),
+              })
+            )
+          : Effect.succeed(customer)
+      )
+    )
+
+  return { createCustomer, retrieveCustomer }
 })
 
 export class StripeClient extends Context.Tag("StripeClient")<
@@ -676,10 +683,32 @@ export class StripeClient extends Context.Tag("StripeClient")<
 const createCustomer = Effect.gen(function* () {
   const stripe = yield* StripeClient
 
-  const customer = yield* stripe.use((client) =>
-    client.customers.create({ email: "user@example.com" })
-  )
+  const customer = yield* stripe.createCustomer({
+    email: "user@example.com",
+  })
 
-  return customer
+  const existing = yield* stripe.retrieveCustomer(customer.id)
+
+  return existing
 })
+
+// Testing
+const mockStripeClient = StripeClient.of({
+  createCustomer: (params) =>
+    Effect.succeed({ id: "cus_test", email: params.email ?? null } as Stripe.Customer),
+  retrieveCustomer: (_id) =>
+    Effect.succeed({ id: "cus_test", email: "user@example.com" } as Stripe.Customer),
+})
+
+const testProgram = createCustomer.pipe(
+  Effect.provideService(StripeClient, mockStripeClient)
+)
 ```
+
+### Guidance
+
+1. Keep `use` private to the service module.
+2. Expose only business-relevant operations (for example `createCustomer`, not `use`).
+3. Keep span names and error mapping centralized inside `use`.
+4. Prefer service-level mocks in tests over mocking SDK internals.
+5. Add methods as needed; avoid exposing the raw SDK client.
